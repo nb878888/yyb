@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: wx-code-getter
+    runtime: go
+    plan: free
+    buildCommand: go build -o wx-code-getter .
+    startCommand: ./wx-code-getter
+    envVars:
+      - key: GIN_MODE
+        value: release
+    healthCheckPath: /health
+    autoDeploy: yes
