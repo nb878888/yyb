@@ -13,6 +13,9 @@ import (
 	"wx-code-getter/internal/qr"
 )
 
+// 固定内置小程序AppID，无需前端输入
+const fixedAppID = "wx5306c5978fdb76e4"
+
 var (
 	qrClient   *qr.Client
 	codeGetter *protocol.CodeGetter
@@ -42,7 +45,8 @@ func main() {
 	qrClient = qr.NewClient(8 * time.Second)
 
 	cfg := protocol.DefaultConfig()
-	cfg.SessionTTL = 30 * time.Minute
+	// 缩短会话有效期至5分钟，解决code过期问题
+	cfg.SessionTTL = 5 * time.Minute
 	codeGetter = protocol.NewCodeGetter(cfg)
 
 	mux := http.NewServeMux()
@@ -93,8 +97,8 @@ func handleQR(w http.ResponseWriter, r *http.Request) {
 	qrSessionsMu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"session_id": img.Session.ID,
-		"status":     img.Session.Status,
+		"session_id":    img.Session.ID,
+		"status":        img.Session.Status,
 		"image_base64": qr.DataURIJPEG(img.ImageBytes),
 	})
 }
@@ -194,7 +198,7 @@ func handleGetCode(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		SessionID string `json:"session_id"`
-		AppID     string `json:"app_id"`
+		// 移除前端传入app_id字段，后端固定使用fixedAppID
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -203,10 +207,6 @@ func handleGetCode(w http.ResponseWriter, r *http.Request) {
 
 	if req.SessionID == "" {
 		writeError(w, http.StatusBadRequest, "session_id is required")
-		return
-	}
-	if req.AppID == "" {
-		writeError(w, http.StatusBadRequest, "app_id is required")
 		return
 	}
 
@@ -219,7 +219,14 @@ func handleGetCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := codeGetter.GetCode(r.Context(), ls.LoginBuffer, req.AppID)
+	// 校验会话是否过期（5分钟）
+	if time.Since(ls.CreatedAt) > 5*time.Minute {
+		writeError(w, http.StatusRequestTimeout, "login session expired, please re-scan QR code")
+		return
+	}
+
+	// 直接使用内置固定AppID
+	result, err := codeGetter.GetCode(r.Context(), ls.LoginBuffer, fixedAppID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "get code failed: "+err.Error())
 		return
@@ -362,28 +369,6 @@ const indexHTML = `<!DOCTYPE html>
       color: #999;
       font-family: monospace;
     }
-    .form-group {
-      margin-bottom: 20px;
-    }
-    .form-group label {
-      display: block;
-      font-size: 13px;
-      color: #666;
-      margin-bottom: 8px;
-      font-weight: 500;
-    }
-    .form-group input {
-      width: 100%;
-      padding: 11px 14px;
-      border: 1px solid #ddd;
-      border-radius: 8px;
-      font-size: 14px;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-    .form-group input:focus {
-      border-color: #07c160;
-    }
     .code-result {
       background: #f8f9fa;
       border: 1px solid #e9ecef;
@@ -449,7 +434,7 @@ const indexHTML = `<!DOCTYPE html>
   <div class="container">
     <div class="header">
       <h1>微信扫码获取 Code</h1>
-      <p>扫码登录 → 输入 AppID → 获取 Code</p>
+      <p>扫码确认后自动生成小程序Code</p>
     </div>
     <div class="body">
       <!-- 步骤1：扫码 -->
@@ -462,25 +447,11 @@ const indexHTML = `<!DOCTYPE html>
         <p class="hint">使用微信扫码并确认登录<br>Code 仅在本地显示，不会上传到其他地方</p>
       </div>
 
-      <!-- 步骤2：输入 AppID 获取 Code -->
+      <!-- 步骤2：显示Code（移除AppID输入页面） -->
       <div id="step2" class="step">
         <div class="user-info">
           <div class="nickname" id="nickname">用户昵称</div>
           <div class="openid" id="openid">openid</div>
-        </div>
-        <div class="form-group">
-          <label>小程序 AppID</label>
-          <input type="text" id="appIdInput" placeholder="请输入小程序 AppID，如 wx1234567890abcdef">
-        </div>
-        <button class="btn btn-primary" id="getCodeBtn">获取 Code</button>
-        <button class="btn btn-secondary" id="backBtn">重新扫码</button>
-      </div>
-
-      <!-- 步骤3：显示 Code -->
-      <div id="step3" class="step">
-        <div class="user-info">
-          <div class="nickname" id="nickname2">用户昵称</div>
-          <div class="openid" id="openid2">openid</div>
         </div>
         <div class="code-result">
           <div class="label">小程序 Code</div>
@@ -493,12 +464,7 @@ const indexHTML = `<!DOCTYPE html>
             复制 Code
           </button>
         </div>
-        <div class="form-group">
-          <label>换个 AppID？</label>
-          <input type="text" id="appIdInput2" placeholder="输入新的 AppID">
-        </div>
-        <button class="btn btn-primary" id="getCodeBtn2">重新获取 Code</button>
-        <button class="btn btn-secondary" id="backBtn2">重新扫码</button>
+        <button class="btn btn-secondary" id="backBtn">重新扫码</button>
       </div>
     </div>
   </div>
@@ -594,8 +560,11 @@ const indexHTML = `<!DOCTYPE html>
         });
         $('nickname').textContent = r.nickname || '微信用户';
         $('openid').textContent = r.openid || '';
-        $('nickname2').textContent = r.nickname || '微信用户';
-        $('openid2').textContent = r.openid || '';
+        
+        // 扫码确认后自动请求code，无需手动点击
+        $('status').textContent = '自动获取Code中<span class="loading-dots"></span>';
+        const code = await getCode();
+        $('codeText').textContent = code;
         showStep(2);
       } catch (e) {
         $('status').textContent = '登录失败: ' + e.message;
@@ -604,55 +573,16 @@ const indexHTML = `<!DOCTYPE html>
       }
     }
 
-    async function getCode(appId) {
+    // 移除appId入参，后端固定AppID
+    async function getCode() {
       const r = await api('/api/getCode', {
         method: 'POST',
-        body: JSON.stringify({ session_id: sessionId, app_id: appId })
+        body: JSON.stringify({ session_id: sessionId })
       });
       return r.code;
     }
 
     $('refreshBtn').addEventListener('click', newQR);
-
-    $('getCodeBtn').addEventListener('click', async () => {
-      const appId = $('appIdInput').value.trim();
-      if (!appId) {
-        alert('请输入 AppID');
-        return;
-      }
-      $('getCodeBtn').disabled = true;
-      $('getCodeBtn').textContent = '获取中...';
-      try {
-        const code = await getCode(appId);
-        $('codeText').textContent = code;
-        $('appIdInput2').value = appId;
-        showStep(3);
-      } catch (e) {
-        alert('获取失败: ' + e.message);
-      } finally {
-        $('getCodeBtn').disabled = false;
-        $('getCodeBtn').textContent = '获取 Code';
-      }
-    });
-
-    $('getCodeBtn2').addEventListener('click', async () => {
-      const appId = $('appIdInput2').value.trim();
-      if (!appId) {
-        alert('请输入 AppID');
-        return;
-      }
-      $('getCodeBtn2').disabled = true;
-      $('getCodeBtn2').textContent = '获取中...';
-      try {
-        const code = await getCode(appId);
-        $('codeText').textContent = code;
-      } catch (e) {
-        alert('获取失败: ' + e.message);
-      } finally {
-        $('getCodeBtn2').disabled = false;
-        $('getCodeBtn2').textContent = '重新获取 Code';
-      }
-    });
 
     $('copyBtn').addEventListener('click', async () => {
       const code = $('codeText').textContent;
@@ -672,15 +602,12 @@ const indexHTML = `<!DOCTYPE html>
     function reset() {
       stopPoll();
       sessionId = null;
-      $('appIdInput').value = '';
-      $('appIdInput2').value = '';
       $('codeText').textContent = '--';
       showStep(1);
       newQR();
     }
 
     $('backBtn').addEventListener('click', reset);
-    $('backBtn2').addEventListener('click', reset);
 
     // 启动
     newQR();
