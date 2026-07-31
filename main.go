@@ -417,6 +417,29 @@ const indexHTML = `<!DOCTYPE html>
       margin-top: 12px;
       line-height: 1.5;
     }
+    /* 自动消失轻提示样式 */
+    .toast {
+      position: fixed;
+      top: 30px;
+      left: 50%;
+      transform: translateX(-50%);
+      padding: 10px 20px;
+      border-radius: 8px;
+      color: #fff;
+      font-size: 14px;
+      z-index: 9999;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .toast.success {
+      background: #07c160;
+    }
+    .toast.error {
+      background: #f56c6c;
+    }
+    .toast.show {
+      opacity: 1;
+    }
   </style>
 </head>
 <body>
@@ -471,6 +494,22 @@ const indexHTML = `<!DOCTYPE html>
     function showStep(n) {
       document.querySelectorAll('.step').forEach(s => s.classList.remove('active'));
       $('step' + n).classList.add('active');
+    }
+
+    // 自动消失轻提示，无需手动确认
+    function showToast(msg, type = "success") {
+      let toast = document.querySelector(".toast");
+      if (!toast) {
+        toast = document.createElement("div");
+        toast.className = "toast";
+        document.body.appendChild(toast);
+      }
+      toast.className = "toast " + type;
+      toast.innerText = msg;
+      toast.classList.add("show");
+      setTimeout(() => {
+        toast.classList.remove("show");
+      }, 2000);
     }
 
     async function api(url, options = {}) {
@@ -578,7 +617,7 @@ const indexHTML = `<!DOCTYPE html>
       return r.code;
     }
 
-    // 手动点击重新获取Code按钮事件
+    // 手动点击重新获取Code按钮事件（已替换为自动消失toast，无弹窗确认）
     $('refreshCodeBtn').addEventListener('click', async () => {
       const btn = $('refreshCodeBtn');
       btn.disabled = true;
@@ -587,11 +626,13 @@ const indexHTML = `<!DOCTYPE html>
         // 手动请求，覆盖本地savedCode
         savedCode = await getCode();
         $('codeText').textContent = savedCode;
-        alert('已获取全新有效Code');
+        showToast('已获取全新有效Code', 'success');
       } catch (e) {
-        // 获取失败弹窗提示，自动切回扫码页面
-        alert('获取Code失败：' + e.message + "\n即将自动刷新二维码，请重新扫码");
-        reset();
+        // 获取失败轻提示，2秒自动消失，随后自动切回扫码页面
+        showToast('获取Code失败：' + e.message, 'error');
+        setTimeout(() => {
+          reset();
+        }, 2200);
       } finally {
         btn.disabled = false;
         btn.textContent = '重新获取Code';
@@ -611,7 +652,7 @@ const indexHTML = `<!DOCTYPE html>
           $('copyBtn').innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg> 复制 Code';
         }, 2000);
       } catch (e) {
-        alert('复制失败，请手动复制');
+        showToast('复制失败，请手动复制', 'error');
       }
     });
 
