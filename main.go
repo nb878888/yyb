@@ -13,7 +13,7 @@ import (
 	"wx-code-getter/internal/qr"
 )
 
-// 固定内置小程序AppID，无需前端输入
+// 固定内置小程序AppID
 const fixedAppID = "wx5306c5978fdb76e4"
 
 var (
@@ -45,8 +45,6 @@ func main() {
 	qrClient = qr.NewClient(8 * time.Second)
 
 	cfg := protocol.DefaultConfig()
-	// 缩短会话有效期至5分钟，解决code过期问题
-	cfg.SessionTTL = 5 * time.Minute
 	codeGetter = protocol.NewCodeGetter(cfg)
 
 	mux := http.NewServeMux()
@@ -167,7 +165,6 @@ func handleQRConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 存储登录会话
 	ls := &loginSession{
 		LoginBuffer: result.LoginBuffer,
 		OpenID:      result.Credentials.OpenID,
@@ -178,7 +175,6 @@ func handleQRConfirm(w http.ResponseWriter, r *http.Request) {
 	loginSessions[req.SessionID] = ls
 	loginSessionsMu.Unlock()
 
-	// 清理 QR 会话
 	qrSessionsMu.Lock()
 	delete(qrSessions, req.SessionID)
 	qrSessionsMu.Unlock()
@@ -198,7 +194,6 @@ func handleGetCode(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		SessionID string `json:"session_id"`
-		// 移除前端传入app_id字段，后端固定使用fixedAppID
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -219,13 +214,7 @@ func handleGetCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 校验会话是否过期（5分钟）
-	if time.Since(ls.CreatedAt) > 5*time.Minute {
-		writeError(w, http.StatusRequestTimeout, "login session expired, please re-scan QR code")
-		return
-	}
-
-	// 直接使用内置固定AppID
+	// 移除会话过期时间校验，不再主动判断过期
 	result, err := codeGetter.GetCode(r.Context(), ls.LoginBuffer, fixedAppID)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "get code failed: "+err.Error())
@@ -339,6 +328,7 @@ const indexHTML = `<!DOCTYPE html>
     .btn-primary {
       background: #07c160;
       color: #fff;
+      margin-bottom:10px;
     }
     .btn-primary:hover { background: #06ad56; }
     .btn-primary:disabled {
@@ -348,7 +338,6 @@ const indexHTML = `<!DOCTYPE html>
     .btn-secondary {
       background: #f5f5f5;
       color: #666;
-      margin-top: 10px;
     }
     .btn-secondary:hover { background: #eee; }
     .user-info {
@@ -447,7 +436,7 @@ const indexHTML = `<!DOCTYPE html>
         <p class="hint">使用微信扫码并确认登录<br>Code 仅在本地显示，不会上传到其他地方</p>
       </div>
 
-      <!-- 步骤2：显示Code（移除AppID输入页面） -->
+      <!-- 步骤2：展示Code，新增手动重新获取按钮 -->
       <div id="step2" class="step">
         <div class="user-info">
           <div class="nickname" id="nickname">用户昵称</div>
@@ -464,6 +453,8 @@ const indexHTML = `<!DOCTYPE html>
             复制 Code
           </button>
         </div>
+        <!-- 手动按钮：只有点击才重新获取code -->
+        <button class="btn btn-primary" id="refreshCodeBtn">重新获取Code</button>
         <button class="btn btn-secondary" id="backBtn">重新扫码</button>
       </div>
     </div>
@@ -472,6 +463,8 @@ const indexHTML = `<!DOCTYPE html>
   <script>
     let sessionId = null;
     let pollTimer = null;
+    // 全局存储已获取的code，不会自动覆盖
+    let savedCode = "";
 
     const $ = id => document.getElementById(id);
 
@@ -497,6 +490,9 @@ const indexHTML = `<!DOCTYPE html>
       $('status').textContent = '正在生成二维码...';
       $('status').className = 'status';
       $('refreshBtn').style.display = 'none';
+      // 重置缓存code
+      savedCode = "";
+      $('codeText').textContent = "--";
 
       try {
         const r = await api('/api/qr', { method: 'POST' });
@@ -547,7 +543,7 @@ const indexHTML = `<!DOCTYPE html>
           $('refreshBtn').style.display = 'block';
         }
       } catch (e) {
-        // 忽略轮询错误
+        // 轮询只更新扫码状态，绝不自动请求code
       }
     }
 
@@ -561,10 +557,10 @@ const indexHTML = `<!DOCTYPE html>
         $('nickname').textContent = r.nickname || '微信用户';
         $('openid').textContent = r.openid || '';
         
-        // 扫码确认后自动请求code，无需手动点击
+        // 初次登录仅自动获取一次code存入全局变量
         $('status').textContent = '自动获取Code中<span class="loading-dots"></span>';
-        const code = await getCode();
-        $('codeText').textContent = code;
+        savedCode = await getCode();
+        $('codeText').textContent = savedCode;
         showStep(2);
       } catch (e) {
         $('status').textContent = '登录失败: ' + e.message;
@@ -573,7 +569,7 @@ const indexHTML = `<!DOCTYPE html>
       }
     }
 
-    // 移除appId入参，后端固定AppID
+    // 获取code公共方法，仅手动按钮触发调用
     async function getCode() {
       const r = await api('/api/getCode', {
         method: 'POST',
@@ -581,6 +577,26 @@ const indexHTML = `<!DOCTYPE html>
       });
       return r.code;
     }
+
+    // 手动点击重新获取Code按钮事件
+    $('refreshCodeBtn').addEventListener('click', async () => {
+      const btn = $('refreshCodeBtn');
+      btn.disabled = true;
+      btn.textContent = '重新获取中...';
+      try {
+        // 手动请求，覆盖本地savedCode
+        savedCode = await getCode();
+        $('codeText').textContent = savedCode;
+        alert('已获取全新有效Code');
+      } catch (e) {
+        // 获取失败弹窗提示，自动切回扫码页面
+        alert('获取Code失败：' + e.message + "\n即将自动刷新二维码，请重新扫码");
+        reset();
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '重新获取Code';
+      }
+    });
 
     $('refreshBtn').addEventListener('click', newQR);
 
@@ -602,6 +618,7 @@ const indexHTML = `<!DOCTYPE html>
     function reset() {
       stopPoll();
       sessionId = null;
+      savedCode = "";
       $('codeText').textContent = '--';
       showStep(1);
       newQR();
@@ -609,7 +626,7 @@ const indexHTML = `<!DOCTYPE html>
 
     $('backBtn').addEventListener('click', reset);
 
-    // 启动
+    // 页面初始化
     newQR();
   </script>
 </body>
